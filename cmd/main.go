@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/TFMV/gonzo/db"
+	"github.com/TFMV/gonzo/index"
+	"github.com/TFMV/gonzo/query"
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
@@ -91,53 +93,68 @@ Options:
 	// Channel to stream query results.
 	resultsCh := make(chan map[int64]float64)
 
-	// Context to control goroutines.
+	// Create root context with cancellation
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Start streaming query results in a separate goroutine.
+	// Create error channel for goroutine errors
+	errCh := make(chan error, 1)
+
+	// Start streaming query results in a separate goroutine
 	go func() {
 		ticker := time.NewTicker(time.Duration(queryInterval) * time.Second)
 		defer ticker.Stop()
+
 		for {
 			select {
 			case <-ctx.Done():
-				logger.Info("Query streamer: context cancelled")
+				logger.Info("Query streamer: shutting down", zap.Error(ctx.Err()))
 				return
 			case <-ticker.C:
-				records := database.GetRecords()
-				if len(records) == 0 {
-					logger.Debug("No records to query")
-					continue
-				}
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					records := database.GetRecords()
+					if len(records) == 0 {
+						continue
+					}
 
-				// Filter records by time window and aggregate
-				totals := make(map[int64]float64)
-				windowStart := time.Now().Add(-10 * time.Second)
+					totals := aggregateRecords(records, 10*time.Second)
 
-				for _, record := range records {
-					timestamps := record.Column(2).(*array.Timestamp)
-					userIDs := record.Column(0).(*array.Int64)
-					amounts := record.Column(1).(*array.Float64)
-
-					for i := 0; i < int(record.NumRows()); i++ {
-						ts := time.Unix(0, int64(timestamps.Value(i)))
-						if ts.After(windowStart) {
-							userID := userIDs.Value(i)
-							amount := amounts.Value(i)
-							totals[userID] += amount
-						}
+					// Try to send results, respect context cancellation
+					select {
+					case resultsCh <- totals:
+					case <-ctx.Done():
+						return
 					}
 				}
-
-				resultsCh <- totals
 			}
 		}
 	}()
 
-	// Start ingestion ticker.
-	ingestTicker := time.NewTicker(time.Duration(ingestInterval) * time.Second)
-	defer ingestTicker.Stop()
+	// Start ingestion ticker with context
+	go func() {
+		ticker := time.NewTicker(time.Duration(ingestInterval) * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				logger.Info("Ingestion streamer: shutting down", zap.Error(ctx.Err()))
+				return
+			case <-ticker.C:
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					record := GenerateStream()
+					database.AsyncIngest(record)
+					logger.Info("Ingested new record batch", zap.Int("num_records", int(record.NumRows())))
+				}
+			}
+		}
+	}()
 
 	// Listen for OS signals for graceful shutdown.
 	sigCh := make(chan os.Signal, 1)
@@ -147,26 +164,80 @@ Options:
 		zap.Int("ingest_interval", ingestInterval),
 		zap.Int("query_interval", queryInterval))
 
-	// Main event loop.
+	// Move this code before the main event loop
+	// Initialize index manager and query planner
+	indexManager := index.NewIndexManager(index.IndexSettings{
+		BloomFilterFPRate: 0.01,
+		HashIndexSize:     1000,
+		SortedBatchSize:   100,
+	})
+
+	if err := indexManager.CreateIndex("user_id", index.HashIndex); err != nil {
+		logger.Fatal("Failed to create user_id index", zap.Error(err))
+	}
+	if err := indexManager.CreateIndex("timestamp", index.SortedColumn); err != nil {
+		logger.Fatal("Failed to create timestamp index", zap.Error(err))
+	}
+
+	planner := query.NewPlanner(indexManager)
+	streamingQuery, err := query.NewStreamingQuery(&query.Query{
+		Columns: []string{"user_id", "amount"},
+		Aggregates: map[string]query.Aggregation{
+			"amount": query.Sum,
+		},
+		GroupBy: &query.GroupBy{
+			Columns: []string{"user_id"},
+		},
+		Window: &query.Window{
+			Duration: 10 * time.Second,
+		},
+	}, planner)
+
+	if err != nil {
+		logger.Fatal("Failed to create streaming query", zap.Error(err))
+	}
+
+	if err := streamingQuery.Start(ctx, database); err != nil {
+		logger.Fatal("Failed to start streaming query", zap.Error(err))
+	}
+
+	// Then the main event loop
 	for {
 		select {
-		case <-ctx.Done():
-			logger.Info("Main loop: context cancelled, shutting down")
+		case err := <-errCh:
+			logger.Error("Worker error", zap.Error(err))
+			cancel()
 			return
 		case sig := <-sigCh:
 			logger.Info("Received OS signal, shutting down", zap.String("signal", sig.String()))
 			cancel()
 			return
-		case <-ingestTicker.C:
-			// Generate and ingest a new record batch.
-			record := GenerateStream()
-			database.AsyncIngest(record)
-			logger.Info("Ingested new record batch", zap.Int("num_records", int(record.NumRows())))
 		case result := <-resultsCh:
-			// Log the query result.
 			for user, sum := range result {
 				logger.Info("Query result", zap.Int64("user_id", user), zap.Float64("total_purchase", sum))
 			}
 		}
 	}
+}
+
+// Helper function to aggregate records
+func aggregateRecords(records []arrow.Record, window time.Duration) map[int64]float64 {
+	totals := make(map[int64]float64)
+	windowStart := time.Now().Add(-window)
+
+	for _, record := range records {
+		timestamps := record.Column(2).(*array.Timestamp)
+		userIDs := record.Column(0).(*array.Int64)
+		amounts := record.Column(1).(*array.Float64)
+
+		for i := 0; i < int(record.NumRows()); i++ {
+			ts := time.Unix(0, int64(timestamps.Value(i)))
+			if ts.After(windowStart) {
+				userID := userIDs.Value(i)
+				amount := amounts.Value(i)
+				totals[userID] += amount
+			}
+		}
+	}
+	return totals
 }

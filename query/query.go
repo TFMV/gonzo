@@ -48,15 +48,16 @@ type GroupBy struct {
 
 // Query represents a SQL-like query structure
 type Query struct {
+	Columns    []string               // Columns to select
+	Aggregates map[string]Aggregation // Column -> Aggregation type
+	GroupBy    *GroupBy
+	Window     *Window
 	selectCols []string
 	fromRecs   []arrow.Record
-	whereConds []Condition
-	groupBy    *GroupBy
+	whereConds []Filter
 	orderBy    []string
 	desc       bool
 	limit      int64
-	window     *time.Duration
-	aggregates map[string]Aggregation
 }
 
 type Window struct {
@@ -64,11 +65,18 @@ type Window struct {
 	Offset   time.Duration
 }
 
+// Filter represents a query filter condition
+type Filter struct {
+	Column   string
+	Operator Operator // Use the existing Operator type
+	Value    interface{}
+}
+
 // NewQuery creates a new Query builder
 func NewQuery(records []arrow.Record) *Query {
 	return &Query{
 		fromRecs:   records,
-		aggregates: make(map[string]Aggregation),
+		Aggregates: make(map[string]Aggregation),
 	}
 }
 
@@ -80,27 +88,27 @@ func (q *Query) Select(columns ...string) *Query {
 
 // Where adds a where condition
 func (q *Query) Where(column string, op Operator, value interface{}) *Query {
-	q.whereConds = append(q.whereConds, Condition{Column: column, Operator: op, Value: value})
+	q.whereConds = append(q.whereConds, Filter{Column: column, Operator: op, Value: value})
 	return q
 }
 
 // GroupByColumns adds group by columns
 func (q *Query) GroupByColumns(columns ...string) *Query {
-	q.groupBy = &GroupBy{Columns: columns}
+	q.GroupBy = &GroupBy{Columns: columns}
 	return q
 }
 
 // Having adds a having condition
 func (q *Query) Having(column string, op Operator, value interface{}) *Query {
-	if q.groupBy != nil {
-		q.groupBy.Having = &Condition{Column: column, Operator: op, Value: value}
+	if q.GroupBy != nil {
+		q.GroupBy.Having = &Condition{Column: column, Operator: op, Value: value}
 	}
 	return q
 }
 
 // Aggregate adds an aggregation
 func (q *Query) Aggregate(column string, agg Aggregation) *Query {
-	q.aggregates[column] = agg
+	q.Aggregates[column] = agg
 	return q
 }
 
@@ -122,9 +130,9 @@ func (q *Query) Limit(limit int64) *Query {
 	return q
 }
 
-// Window sets the time window
-func (q *Query) Window(window time.Duration) *Query {
-	q.window = &window
+// WithWindow sets the time window
+func (q *Query) WithWindow(window time.Duration) *Query {
+	q.Window = &Window{Duration: window}
 	return q
 }
 
@@ -145,15 +153,15 @@ func (q *Query) Execute() (*QueryResult, error) {
 		return nil, fmt.Errorf("filter error: %w", err)
 	}
 
-	if q.window != nil {
+	if q.Window != nil {
 		return q.executeWindow(filtered)
 	}
 
-	if len(q.aggregates) > 0 {
+	if len(q.Aggregates) > 0 {
 		return q.executeAggregation(filtered)
 	}
 
-	if q.groupBy != nil {
+	if q.GroupBy != nil {
 		return q.executeGroupBy(filtered)
 	}
 
@@ -183,8 +191,8 @@ func (q *Query) validate() error {
 	}
 
 	// Validate the GROUP BY clause
-	if q.groupBy != nil {
-		if len(q.groupBy.Columns) == 0 {
+	if q.GroupBy != nil {
+		if len(q.GroupBy.Columns) == 0 {
 			return fmt.Errorf("GROUP BY clause must have at least one column")
 		}
 	}
@@ -202,8 +210,8 @@ func (q *Query) validate() error {
 	}
 
 	// Validate the WINDOW clause
-	if q.window != nil {
-		if *q.window <= 0 {
+	if q.Window != nil {
+		if q.Window.Duration <= 0 {
 			return fmt.Errorf("WINDOW must be a positive duration")
 		}
 	}
@@ -216,7 +224,7 @@ func (q *Query) applyFilters() ([]arrow.Record, error) {
 	for _, record := range q.fromRecs {
 		matches := true
 		for _, cond := range q.whereConds {
-			if !cond.apply(record) {
+			if !cond.Operator.apply(record, cond.Value) {
 				matches = false
 				break
 			}
@@ -228,7 +236,7 @@ func (q *Query) applyFilters() ([]arrow.Record, error) {
 	return filtered, nil
 }
 
-func (c *Condition) apply(record arrow.Record) bool {
+func (c *Filter) apply(record arrow.Record) bool {
 	colIndex := -1
 	schema := record.Schema()
 	for i, field := range schema.Fields() {
@@ -307,7 +315,7 @@ func (op Operator) apply(value, conditionValue interface{}) bool {
 func (q *Query) executeAggregation(records []arrow.Record) (*QueryResult, error) {
 	aggregated := make(map[string]interface{})
 	for _, record := range records {
-		for column, agg := range q.aggregates {
+		for column, agg := range q.Aggregates {
 			val, err := getColumnValue(record, column)
 			if err != nil {
 				return nil, err
@@ -337,7 +345,7 @@ func (q *Query) executeGroupBy(records []arrow.Record) (*QueryResult, error) {
 	// Group records by the specified columns
 	for _, record := range records {
 		groupKey := ""
-		for i, column := range q.groupBy.Columns {
+		for i, column := range q.GroupBy.Columns {
 			val, err := getColumnValue(record, column)
 			if err != nil {
 				return nil, err
@@ -355,7 +363,7 @@ func (q *Query) executeGroupBy(records []arrow.Record) (*QueryResult, error) {
 
 	for groupKey, records := range groups {
 		for _, record := range records {
-			for column, agg := range q.aggregates {
+			for column, agg := range q.Aggregates {
 				val, err := getColumnValue(record, column)
 				if err != nil {
 					return nil, err
@@ -419,7 +427,7 @@ func (q *Query) executeWindow(records []arrow.Record) (*QueryResult, error) {
 			return nil, err
 		}
 		ts := val.(arrow.Timestamp)
-		windowKey := time.Unix(int64(ts), 0).Truncate(*q.window).String()
+		windowKey := time.Unix(int64(ts), 0).Truncate(q.Window.Duration).String()
 		windowed[windowKey] = append(windowed[windowKey], record)
 	}
 
@@ -460,7 +468,7 @@ func GroupByUserWindow(records []arrow.Record, window time.Duration) (map[int64]
 		Select("user_id", "purchase_amount").
 		GroupByColumns("user_id").
 		Aggregate("purchase_amount", Sum).
-		Window(window)
+		WithWindow(window)
 
 	result, err := query.Execute()
 	if err != nil {

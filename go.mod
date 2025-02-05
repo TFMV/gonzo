@@ -6,10 +6,12 @@ require (
 	cloud.google.com/go/storage v1.50.0
 	github.com/RoaringBitmap/roaring v1.9.4
 	github.com/apache/arrow-go/v18 v18.1.0
+	github.com/bits-and-blooms/bloom/v3 v3.7.0
 	github.com/docopt/docopt.go v0.0.0-20180111231733-ee0de3bc6815
 	github.com/golang/groupcache v0.0.0-20241129210726-2c02b8208cf8
 	github.com/prometheus/client_golang v1.20.5
 	github.com/sony/gobreaker v1.0.0
+	github.com/spaolacci/murmur3 v1.1.0
 	github.com/stretchr/testify v1.10.0
 	go.uber.org/zap v1.27.0
 	google.golang.org/api v0.214.0
