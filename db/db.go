@@ -69,13 +69,34 @@ func (db *DB) PruneOldRecords() {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
-	cutoff := arrow.Timestamp(time.Now().Add(-db.retention).Unix())
+	if len(db.records) == 0 {
+		return
+	}
+
+	cutoff := time.Now().Add(-db.retention)
+	cutoffTs := arrow.Timestamp(cutoff.UnixNano())
 	newRecords := []arrow.Record{}
+
 	for _, record := range db.records {
+		if record == nil {
+			continue
+		}
+
 		timestampCol := record.Column(2).(*array.Timestamp)
-		if timestampCol.Value(0) >= cutoff {
+		if timestampCol == nil || timestampCol.Len() == 0 {
+			record.Release()
+			continue
+		}
+
+		if arrow.Timestamp(timestampCol.Value(0)) >= cutoffTs {
 			newRecords = append(newRecords, record)
 		} else {
+			// Clean up index before releasing record
+			userCol := record.Column(0).(*array.Int64)
+			for i := 0; i < userCol.Len(); i++ {
+				userID := userCol.Value(i)
+				delete(db.index, userID)
+			}
 			record.Release()
 		}
 	}
