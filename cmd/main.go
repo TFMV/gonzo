@@ -12,13 +12,14 @@ import (
 	"github.com/TFMV/gonzo/query"
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/docopt/docopt.go"
 	"go.uber.org/zap"
 )
 
 // GenerateStream simulates an Arrow record batch of transactions.
 func GenerateStream() arrow.Record {
-	builder := array.NewRecordBuilder(db.Pool, db.Schema)
+	builder := array.NewRecordBuilder(memory.DefaultAllocator, db.GetSchema())
 	// Release the builder’s underlying buffers after creating the record.
 	defer builder.Release()
 
@@ -83,7 +84,7 @@ Options:
 	logger.Info("Loaded embedded asset", zap.String("query", embeddedQuery))
 
 	// Initialize the in-memory database.
-	database := db.New()
+	database := db.New(10*time.Second, 100)
 	defer database.Close()
 
 	// Channel to stream query results.
@@ -103,7 +104,7 @@ Options:
 				logger.Info("Query streamer: context cancelled")
 				return
 			case <-ticker.C:
-				records := database.Records()
+				records := database.GetRecords()
 				// Execute the GROUP BY query for transactions in the last 10 seconds.
 				res, err := query.GroupByUserWindow(records, 10*time.Second)
 				if err != nil {
