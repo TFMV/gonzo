@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/TFMV/gonzo/db"
-	"github.com/TFMV/gonzo/query"
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
@@ -107,13 +106,31 @@ Options:
 				return
 			case <-ticker.C:
 				records := database.GetRecords()
-				// Execute the GROUP BY query for transactions in the last 10 seconds.
-				res, err := query.GroupByUserWindow(records, 10*time.Second)
-				if err != nil {
-					logger.Error("Failed to execute group by query", zap.Error(err))
+				if len(records) == 0 {
+					logger.Debug("No records to query")
 					continue
 				}
-				resultsCh <- res
+
+				// Filter records by time window and aggregate
+				totals := make(map[int64]float64)
+				windowStart := time.Now().Add(-10 * time.Second)
+
+				for _, record := range records {
+					timestamps := record.Column(2).(*array.Timestamp)
+					userIDs := record.Column(0).(*array.Int64)
+					amounts := record.Column(1).(*array.Float64)
+
+					for i := 0; i < int(record.NumRows()); i++ {
+						ts := time.Unix(0, int64(timestamps.Value(i)))
+						if ts.After(windowStart) {
+							userID := userIDs.Value(i)
+							amount := amounts.Value(i)
+							totals[userID] += amount
+						}
+					}
+				}
+
+				resultsCh <- totals
 			}
 		}
 	}()
