@@ -1,10 +1,13 @@
 package gonzo_test
 
 import (
+	"fmt"
+	"os"
 	"testing"
 	"time"
 
 	"github.com/TFMV/gonzo/db"
+	gonzo_storage "github.com/TFMV/gonzo/storage"
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
@@ -100,4 +103,87 @@ func TestPropertyBasedQueries(t *testing.T) {
 		_ = records
 		_ = query
 	})
+}
+
+func TestStorage(t *testing.T) {
+	t.Parallel()
+
+	database := db.NewDB(10*time.Second, 100, 100, 10*time.Millisecond)
+	defer database.Close()
+
+	storage := gonzo_storage.NewStorage(database)
+	defer func() {
+		if err := storage.Close(); err != nil {
+			t.Errorf("Failed to close storage: %v", err)
+		}
+	}()
+
+	if err := storage.SaveToDisk("test.arrow"); err != nil {
+		t.Fatalf("Failed to save: %v", err)
+	}
+	if err := storage.LoadFromDisk("test.arrow"); err != nil {
+		t.Fatalf("Failed to load: %v", err)
+	}
+}
+
+func TestGCSStorage(t *testing.T) {
+	t.Parallel()
+
+	creds := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS")
+	if os.Getenv("CI") != "" || creds == "" {
+		t.Skip("Skipping GCS test in CI or without credentials")
+	}
+	t.Logf("Using credentials from: %s", creds)
+
+	database := db.NewDB(10*time.Second, 100, 100, 10*time.Millisecond)
+	defer database.Close()
+
+	// Create some test data
+	record := createTestRecord(memory.DefaultAllocator)
+	defer record.Release()
+	database.AsyncIngest(record)
+	database.WaitForBatch()
+
+	storage, err := gonzo_storage.NewGCSStorage(database, gonzo_storage.GCSConfig{
+		BucketName: "tfmv5",
+		Prefix:     "gonzo/test",
+	})
+	if err != nil {
+		t.Fatalf("Failed to create GCS storage: %v", err)
+	}
+	defer storage.Close()
+
+	testFile := fmt.Sprintf("test-%d.arrow", time.Now().Unix())
+
+	if err := storage.SaveToGCS(testFile); err != nil {
+		t.Fatalf("Failed to save to GCS: %v", err)
+	}
+	t.Logf("Saved to gs://tfmv5/gonzo/test/%s", testFile)
+
+	size, err := storage.GetBackupSize(testFile)
+	if err != nil {
+		t.Fatalf("Failed to get backup size: %v", err)
+	}
+	t.Logf("Backup size: %d bytes", size)
+
+	if err := storage.LoadFromGCS(testFile); err != nil {
+		t.Fatalf("Failed to load from GCS: %v", err)
+	}
+
+	// Clean up only after everything succeeds
+	if err := storage.DeleteBackup(testFile); err != nil {
+		t.Logf("Warning: failed to delete test file: %v", err)
+	}
+}
+
+func TestBackupRestore(t *testing.T) {
+	t.Parallel()
+
+	database := db.NewDB(10*time.Second, 100, 100, 10*time.Millisecond)
+	defer database.Close()
+
+	storage := gonzo_storage.NewStorage(database)
+	defer storage.Close()
+	storage.Backup("test.arrow")
+	storage.Restore("test.arrow")
 }
