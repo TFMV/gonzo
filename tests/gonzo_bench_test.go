@@ -108,21 +108,20 @@ func BenchmarkDBPruneOldRecords(b *testing.B) {
 	sizes := []int{smallSize, mediumSize, largeSize}
 	for _, size := range sizes {
 		b.Run(fmt.Sprintf("size_%d", size), func(b *testing.B) {
-			database := db.NewDB(1*time.Microsecond, 100, 100, 10*time.Microsecond)
+			database := db.NewDB(1*time.Microsecond, 100, batchSize, 10*time.Millisecond)
 			defer database.Close()
 
 			record := createBenchRecord(memory.DefaultAllocator, size)
 			defer record.Release()
 
+			// Pre-populate database
+			database.AsyncIngest(record)
+			database.WaitForBatch()
+
 			b.ResetTimer()
 			b.ReportAllocs()
 
 			for i := 0; i < b.N; i++ {
-				b.StopTimer()
-				database.AsyncIngest(record)
-				time.Sleep(2 * time.Microsecond)
-				b.StartTimer()
-
 				database.PruneOldRecords()
 			}
 		})
@@ -174,11 +173,18 @@ func BenchmarkDBAsyncIngest(b *testing.B) {
 			b.ResetTimer()
 			b.ReportAllocs()
 
+			var wg sync.WaitGroup
 			b.RunParallel(func(pb *testing.PB) {
 				for pb.Next() {
-					database.AsyncIngest(record)
+					wg.Add(1)
+					go func() {
+						defer wg.Done()
+						database.AsyncIngest(record)
+						database.WaitForBatch()
+					}()
 				}
 			})
+			wg.Wait()
 		})
 	}
 }
@@ -192,7 +198,7 @@ func BenchmarkMemoryUsage(b *testing.B) {
 			runtime.ReadMemStats(&m)
 			initialAlloc := m.Alloc
 
-			database := db.NewDB(10*time.Second, 100, 100, 10*time.Second)
+			database := db.NewDB(10*time.Second, 100, batchSize, 10*time.Millisecond)
 			defer database.Close()
 
 			record := createBenchRecord(memory.DefaultAllocator, size)
@@ -203,6 +209,7 @@ func BenchmarkMemoryUsage(b *testing.B) {
 
 			for i := 0; i < b.N; i++ {
 				database.AsyncIngest(record)
+				database.WaitForBatch()
 				if i%100 == 0 {
 					runtime.ReadMemStats(&m)
 					b.ReportMetric(float64(m.Alloc-initialAlloc)/1024/1024, "MB_used")

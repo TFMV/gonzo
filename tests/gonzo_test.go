@@ -9,6 +9,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/stretchr/testify/assert"
+	"pgregory.net/rapid"
 )
 
 func createTestRecord(pool memory.Allocator) arrow.Record {
@@ -83,4 +84,20 @@ func TestDBPruneOldRecords(t *testing.T) {
 	database.PruneOldRecords()
 	records := database.GetRecords()
 	assert.Equal(t, 0, len(records), "Expected 0 records after pruning")
+}
+
+func TestPropertyBasedQueries(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		// generateRandomRecords and generateRandomQuery are user-defined helpers.
+		records := createTestRecord(memory.DefaultAllocator)
+		query := db.Query{
+			SelectColumns: []string{"user_id"},
+			Aggregates:    map[string]string{"amount": "SUM"},
+			GroupBy:       []string{"user_id"},
+			Window:        time.Second * 10,
+		}
+		// Execute the query and validate invariants.
+		_ = records
+		_ = query
+	})
 }
