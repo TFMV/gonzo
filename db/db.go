@@ -289,8 +289,6 @@ type DB struct {
 	retention   time.Duration            // How long to keep records.
 	compression CompressionConfig        // Optional record compression.
 
-	// Error recovery and circuit breaker.
-	errorCount     int64
 	circuitBreaker *gobreaker.CircuitBreaker
 	recovery       *RecoveryManager
 
@@ -543,6 +541,22 @@ func (db *DB) GetRecords() []arrow.Record {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 	return db.records
+}
+
+// GetRecordsSince returns records with a timestamp after the specified time
+func (db *DB) GetRecordsSince(since time.Time) []arrow.Record {
+	var result []arrow.Record
+	for _, record := range db.records {
+		timestamps := record.Column(2).(*array.Timestamp)
+		for i := 0; i < int(record.NumRows()); i++ {
+			ts := time.Unix(0, int64(timestamps.Value(i)))
+			if ts.After(since) {
+				result = append(result, record)
+				break
+			}
+		}
+	}
+	return result
 }
 
 // Close shuts down the DB, releases all records, and stops background workers.
