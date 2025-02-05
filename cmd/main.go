@@ -19,8 +19,10 @@ import (
 
 // GenerateStream simulates an Arrow record batch of transactions.
 func GenerateStream() arrow.Record {
-	builder := array.NewRecordBuilder(memory.DefaultAllocator, db.GetSchema())
-	// Release the builder’s underlying buffers after creating the record.
+	database := db.NewDB(10*time.Second, 100, 100, 10*time.Second)
+	defer database.Close()
+
+	builder := array.NewRecordBuilder(memory.DefaultAllocator, database.GetSchema())
 	defer builder.Release()
 
 	userIDs := builder.Field(0).(*array.Int64Builder)
@@ -84,7 +86,7 @@ Options:
 	logger.Info("Loaded embedded asset", zap.String("query", embeddedQuery))
 
 	// Initialize the in-memory database.
-	database := db.New(10*time.Second, 100)
+	database := db.NewDB(10*time.Second, 100, 100, 10*time.Second)
 	defer database.Close()
 
 	// Channel to stream query results.
@@ -141,7 +143,7 @@ Options:
 		case <-ingestTicker.C:
 			// Generate and ingest a new record batch.
 			record := GenerateStream()
-			database.Ingest(record)
+			database.AsyncIngest(record)
 			logger.Info("Ingested new record batch", zap.Int("num_records", int(record.NumRows())))
 		case result := <-resultsCh:
 			// Log the query result.
