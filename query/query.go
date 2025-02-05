@@ -145,6 +145,10 @@ func (q *Query) Execute() (*QueryResult, error) {
 		return nil, fmt.Errorf("filter error: %w", err)
 	}
 
+	if q.window != nil {
+		return q.executeWindow(filtered)
+	}
+
 	if len(q.aggregates) > 0 {
 		return q.executeAggregation(filtered)
 	}
@@ -301,13 +305,8 @@ func (op Operator) apply(value, conditionValue interface{}) bool {
 }
 
 func (q *Query) executeAggregation(records []arrow.Record) (*QueryResult, error) {
-	filtered, err := q.applyFilters()
-	if err != nil {
-		return nil, fmt.Errorf("filter error: %w", err)
-	}
-
 	aggregated := make(map[string]interface{})
-	for _, record := range filtered {
+	for _, record := range records {
 		for column, agg := range q.aggregates {
 			val, err := getColumnValue(record, column)
 			if err != nil {
@@ -333,15 +332,10 @@ func (q *Query) executeAggregation(records []arrow.Record) (*QueryResult, error)
 }
 
 func (q *Query) executeGroupBy(records []arrow.Record) (*QueryResult, error) {
-	filtered, err := q.applyFilters()
-	if err != nil {
-		return nil, fmt.Errorf("filter error: %w", err)
-	}
-
 	groups := make(map[string][]arrow.Record)
 
 	// Group records by the specified columns
-	for _, record := range filtered {
+	for _, record := range records {
 		groupKey := ""
 		for i, column := range q.groupBy.Columns {
 			val, err := getColumnValue(record, column)
