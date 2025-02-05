@@ -585,33 +585,6 @@ func (db *DB) Restore(path string) error {
 	return fmt.Errorf("Restore not implemented")
 }
 
-// ---------------------------------------------------------------------
-// Property-Based Testing (Stub)
-// ---------------------------------------------------------------------
-
-/*
-import (
-	"testing"
-
-	"pgregory.net/rapid"
-)
-
-func TestPropertyBasedQueries(t *testing.T) {
-	rapid.Check(t, func(t *rapid.T) {
-		// generateRandomRecords and generateRandomQuery are user-defined helpers.
-		records := generateRandomRecords(t)
-		query := generateRandomQuery(t)
-		// Execute the query and validate invariants.
-		_ = records
-		_ = query
-	})
-}
-*/
-
-// ---------------------------------------------------------------------
-// End of db Package
-// ---------------------------------------------------------------------
-
 func (db *DB) WaitForBatch() {
 	select {
 	case <-db.batchDone:
