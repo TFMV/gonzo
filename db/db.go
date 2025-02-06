@@ -629,3 +629,7 @@ func (db *DB) WaitForBatch() {
 	case <-time.After(1 * time.Second): // Timeout to prevent deadlock
 	}
 }
+
+type DeadLetterQueue interface {
+	Write(arrow.Record) error
+}
