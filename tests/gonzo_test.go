@@ -15,7 +15,7 @@ import (
 	"pgregory.net/rapid"
 )
 
-func createTestRecord(pool memory.Allocator) arrow.Record {
+func createDummyRecord(pool memory.Allocator) arrow.Record {
 	database := db.NewDB(10*time.Second, 100, 100, 10*time.Second)
 	defer database.Close()
 
@@ -41,7 +41,7 @@ func TestDBIngest(t *testing.T) {
 	database := db.NewDB(10*time.Second, 100, 100, 10*time.Millisecond)
 	defer database.Close()
 
-	record := createTestRecord(memory.DefaultAllocator)
+	record := createDummyRecord(memory.DefaultAllocator)
 	defer record.Release()
 
 	database.AsyncIngest(record)
@@ -60,7 +60,7 @@ func TestDBQueryByUser(t *testing.T) {
 	database := db.NewDB(10*time.Second, 100, 100, 10*time.Millisecond)
 	defer database.Close()
 
-	record := createTestRecord(memory.DefaultAllocator)
+	record := createDummyRecord(memory.DefaultAllocator)
 	defer record.Release()
 
 	database.AsyncIngest(record)
@@ -76,7 +76,7 @@ func TestDBPruneOldRecords(t *testing.T) {
 	database := db.NewDB(1*time.Microsecond, 100, 100, 10*time.Microsecond)
 	defer database.Close()
 
-	record := createTestRecord(memory.DefaultAllocator)
+	record := createDummyRecord(memory.DefaultAllocator)
 	defer record.Release()
 
 	database.AsyncIngest(record)
@@ -92,7 +92,7 @@ func TestDBPruneOldRecords(t *testing.T) {
 func TestPropertyBasedQueries(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		// generateRandomRecords and generateRandomQuery are user-defined helpers.
-		records := createTestRecord(memory.DefaultAllocator)
+		records := createDummyRecord(memory.DefaultAllocator)
 		query := db.Query{
 			SelectColumns: []string{"user_id"},
 			Aggregates:    map[string]string{"amount": "SUM"},
@@ -139,7 +139,7 @@ func TestGCSStorage(t *testing.T) {
 	defer database.Close()
 
 	// Create some test data
-	record := createTestRecord(memory.DefaultAllocator)
+	record := createDummyRecord(memory.DefaultAllocator)
 	defer record.Release()
 	database.AsyncIngest(record)
 	database.WaitForBatch()
