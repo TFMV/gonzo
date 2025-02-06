@@ -10,10 +10,11 @@ import (
 	"github.com/RoaringBitmap/roaring"
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet/compress"
 	"github.com/golang/groupcache/lru"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/sony/gobreaker"
+	"github.com/sony/gobreaker/v2"
 )
 
 // ---------------------------------------------------------------------
@@ -282,14 +283,14 @@ type Migration struct {
 // advanced query, ingestion, and recovery capabilities.
 type DB struct {
 	mu          sync.RWMutex
-	records     []arrow.Record           // All ingested records.
-	schema      *arrow.Schema            // Schema of records.
-	index       map[int64][]arrow.Record // Simple index on "user_id".
-	queue       chan arrow.Record        // Asynchronous ingestion queue.
-	retention   time.Duration            // How long to keep records.
-	compression CompressionConfig        // Optional record compression.
+	records     []arrow.Record
+	schema      *arrow.Schema
+	index       map[int64][]arrow.Record
+	queue       chan arrow.Record
+	retention   time.Duration
+	compression CompressionConfig
 
-	circuitBreaker *gobreaker.CircuitBreaker
+	circuitBreaker *gobreaker.CircuitBreaker[interface{}]
 	recovery       *RecoveryManager
 
 	// Connection pooling and batch ingestion.
@@ -315,7 +316,7 @@ func NewDB(retention time.Duration, asyncQueueSize, batchSize int, batchTimeout 
 		Name:    "DBCircuitBreaker",
 		Timeout: 5 * time.Second,
 	}
-	cb := gobreaker.NewCircuitBreaker(cbSettings)
+	cb := gobreaker.NewCircuitBreaker[interface{}](cbSettings)
 
 	// Create a worker pool (e.g., with 4 workers; adjust as needed).
 	pool := NewWorkerPool(4)
@@ -453,19 +454,14 @@ func (db *DB) QueryByUser(userID int64) []arrow.Record {
 	return result
 }
 
-// Query executes a structured query against the database.
-// For demonstration, it implements a query like:
-//
-//	SELECT user_id, SUM(purchase_amount)
-//	FROM transactions
-//	GROUP BY user_id WINDOW 10s;
-func (db *DB) Query(q *Query) (map[interface{}]float64, error) {
+// Query executes the plan and returns the results as []arrow.Record
+func (db *DB) Query(plan *Query) ([]arrow.Record, error) {
 	start := time.Now()
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
-	result := make(map[interface{}]float64)
-	cutoff := time.Now().Add(-q.Window)
+	resultMap := make(map[interface{}]float64)
+	cutoff := time.Now().Add(-plan.Window)
 	cutoffTs := arrow.Timestamp(cutoff.UnixNano())
 
 	for _, record := range db.records {
@@ -487,11 +483,39 @@ func (db *DB) Query(q *Query) (map[interface{}]float64, error) {
 		for i := 0; i < int(record.NumRows()); i++ {
 			userID := userCol.Value(i)
 			amount := amtCol.Value(i)
-			result[userID] += amount
+			resultMap[userID] += amount
 		}
 	}
 	queryLatency.Observe(time.Since(start).Seconds())
-	return result, nil
+
+	records := make([]arrow.Record, 0)
+	for key, value := range resultMap {
+		record := createArrowRecord(key, value)
+		records = append(records, record)
+	}
+	return records, nil
+}
+
+// createArrowRecord is a placeholder function to convert a key-value pair to an arrow.Record
+func createArrowRecord(key interface{}, value float64) arrow.Record {
+	schema := arrow.NewSchema([]arrow.Field{
+		{Name: "user_id", Type: arrow.PrimitiveTypes.Int64},
+		{Name: "purchase_amount", Type: arrow.PrimitiveTypes.Float64},
+		{Name: "timestamp", Type: arrow.FixedWidthTypes.Timestamp_s},
+	}, nil)
+
+	userID := array.NewInt64Builder(memory.DefaultAllocator)
+	userID.Append(key.(int64))
+
+	amount := array.NewFloat64Builder(memory.DefaultAllocator)
+	amount.Append(value)
+
+	timestamp := array.NewTimestampBuilder(memory.DefaultAllocator, arrow.FixedWidthTypes.Timestamp_s.(*arrow.TimestampType))
+	timestamp.Append(arrow.Timestamp(time.Now().UnixNano()))
+
+	record := array.NewRecord(schema, []arrow.Array{userID.NewArray(), amount.NewArray(), timestamp.NewArray()}, 1)
+	return record
+
 }
 
 // PruneOldRecords removes records older than the retention period.

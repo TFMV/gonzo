@@ -573,8 +573,14 @@ func compareValues(a, b interface{}) int {
 	}
 }
 
-// ---------------------------------------------------------------------
-// Utility: In some advanced cases, you might want to handle numeric
-// conversions more cleanly or use a custom comparator interface.
-// This is a minimal demonstration for common types.
-// ---------------------------------------------------------------------
+func (s *sortedIndex) GetEntries() []sortedEntry {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.entries
+}
+
+func (s *sortedIndex) GetBatchSize() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.batchSize
+}
