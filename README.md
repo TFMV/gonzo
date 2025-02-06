@@ -2,9 +2,9 @@
 
 Gonzo implements a native Arrow database engine in Go.
 
-## Design
+## Intent
 
-Gonzo is a column-oriented database that uses the Arrow memory format to store data.
+A learning exercise and excuse to play with Arrow and Go. This should never be used in anything resembling production.
 
 ## Status
 
@@ -37,24 +37,3 @@ Gonzo is currently in the early stages of development.
 | Async Ingest (size=1,000)        | 161,748    | 36,510          | 85,869           | 1                    |
 | Async Ingest (size=10,000)       | 161,748    | 36,510          | 85,869           | 1                    |
 | Async Ingest (size=100,000)      | 161,748    | 36,510          | 85,869           | 1                    |
-
-### **Key Insights**
-
-- Ingestion Speed:
-  - Ingestion scales linearly with batch size.  
-  - 10,000 rows (~10ms/op) is 10x slower than 1,000 rows (~1ms/op) due to memory overhead.  
-  - 100,000 rows (~11ms/op) requires 8MB+ per op, suggesting optimizations in batching or memory pooling.
-  
-- Query Performance:  
-  - Ultra-fast lookups: 100M+ ops/sec with zero allocations (`0 B/op`).  
-  - Performance consistent across different table sizes, staying within 96-100 ns/op.
-
-- Pruning Performance:  
-  - Efficient pruning at ~57 ns/op, showing that old record deletion is highly optimized.
-  
-- Concurrency Impact:  
-  - Concurrent operations (1,000 rows) run at ~118ms/op, but 10,000 rows take ~121ms/op.  
-  - Suggests small contention overhead, but concurrency is well-handled.
-
-- Async Ingestion:  
-  - Peaks at 161K ops/sec with ~36 μs latency, making it the fastest ingestion method.
