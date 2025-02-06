@@ -1,3 +1,4 @@
+// Package flight implements the Flight service for Gonzo.
 package flight
 
 import (
@@ -51,7 +52,7 @@ func (sm *SchemaManager) RegisterSchema(endpoint string, schema *arrow.Schema) {
 	sm.schemas[endpoint] = schema
 }
 
-// Validate checks that the record’s schema matches the registered schema.
+// Validate checks that the record's schema matches the registered schema.
 func (sm *SchemaManager) Validate(rec arrow.Record, endpoint string) error {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
@@ -82,18 +83,34 @@ type RetryPolicy struct {
 }
 
 // Execute runs the operation with retry logic.
-func (p *RetryPolicy) Execute(op func() error) error {
+func (p *RetryPolicy) Execute(ctx context.Context, op func() error) error {
 	var err error
+	baseBackoff := p.Backoff
+	maxBackoff := 10 * time.Second // ⏳ Prevent unbounded backoff
+
 	for attempt := 0; attempt < p.MaxAttempts; attempt++ {
 		err = op()
 		if err == nil {
 			return nil
 		}
+
 		st, ok := status.FromError(err)
 		if !ok || !p.RetryableErrors[st.Code()] {
 			return err
 		}
-		time.Sleep(p.Backoff * (1 << attempt))
+
+		// Context-aware backoff with a max limit
+		sleepTime := baseBackoff * (1 << attempt)
+		if sleepTime > maxBackoff {
+			sleepTime = maxBackoff
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(sleepTime):
+			continue
+		}
 	}
 	return err
 }
@@ -198,6 +215,7 @@ func (s *GonzoFlightService) DoGet(ticket *flight.Ticket, stream flight.FlightSe
 }
 
 // DoPut handles Flight DoPut requests for ingesting records.
+// DoPut handles Flight DoPut requests for ingesting records.
 func (s *GonzoFlightService) DoPut(stream flight.FlightService_DoPutServer) error {
 	// Authorize the ingest operation.
 	if err := s.authorizeIngest(stream.Context()); err != nil {
@@ -226,16 +244,27 @@ func (s *GonzoFlightService) DoPut(stream flight.FlightService_DoPutServer) erro
 }
 
 // authorizeIngest verifies that the client is permitted to ingest data.
-func (s *GonzoFlightService) authorizeIngest(ctx context.Context) error {
+func GetClientCert(ctx context.Context) (*credentials.TLSInfo, error) {
 	p, ok := peer.FromContext(ctx)
 	if !ok {
-		return status.Error(codes.Unauthenticated, "no peer info")
+		return nil, status.Error(codes.Unauthenticated, "no peer info")
 	}
+
 	tlsInfo, ok := p.AuthInfo.(credentials.TLSInfo)
 	if !ok || len(tlsInfo.State.PeerCertificates) == 0 {
-		return status.Error(codes.Unauthenticated, "no client certificate")
+		return nil, status.Error(codes.Unauthenticated, "no client certificate")
+	}
+	return &tlsInfo, nil
+}
+
+// Now `authorizeIngest` is simplified:
+func (s *GonzoFlightService) authorizeIngest(ctx context.Context) error {
+	tlsInfo, err := GetClientCert(ctx)
+	if err != nil {
+		return err
 	}
 	clientCert := tlsInfo.State.PeerCertificates[0]
+
 	if !s.roleManager.HasRole(clientCert.Subject.CommonName, "data_ingester") {
 		return status.Error(codes.PermissionDenied, "insufficient privileges")
 	}
@@ -243,10 +272,11 @@ func (s *GonzoFlightService) authorizeIngest(ctx context.Context) error {
 }
 
 // validateRecord checks that the record meets basic criteria.
-func (s *GonzoFlightService) validateRecord(rec arrow.Record) error {
-	expectedSchema := s.gonzoDB.GetSchema()
-	if !rec.Schema().Equal(expectedSchema) {
-		return fmt.Errorf("schema mismatch: got %v, want %v", rec.Schema(), expectedSchema)
+func (s *GonzoFlightService) ValidateRecord(rec arrow.Record) error {
+	schema := s.gonzoDB.GetSchema()
+
+	if !rec.Schema().Equal(schema) {
+		return fmt.Errorf("schema mismatch: got %v, want %v", rec.Schema(), schema)
 	}
 	if rec.NumRows() == 0 {
 		return errors.New("empty record ingestion prohibited")
@@ -257,12 +287,12 @@ func (s *GonzoFlightService) validateRecord(rec arrow.Record) error {
 // ingestRecord validates and asynchronously ingests the record.
 func (s *GonzoFlightService) ingestRecord(rec arrow.Record) error {
 	// Validate the record.
-	if err := s.validateRecord(rec); err != nil {
+	if err := s.ValidateRecord(rec); err != nil {
 		return err
 	}
 
 	// Optionally, process columns (with retries).
-	if err := s.retryPolicy.Execute(func() error {
+	if err := s.retryPolicy.Execute(context.Background(), func() error {
 		return s.processor.Process(rec)
 	}); err != nil {
 		return err
@@ -289,7 +319,7 @@ func (s *GonzoFlightService) ProcessStream(reader flight.DataStreamReader, write
 	for recordReader.Next() {
 		rec := recordReader.Record()
 		// Process the record with retry logic.
-		if err := s.retryPolicy.Execute(func() error {
+		if err := s.retryPolicy.Execute(context.Background(), func() error {
 			return s.processor.Process(rec)
 		}); err != nil {
 			s.dlq.Write(rec)
@@ -313,10 +343,21 @@ func SliceRecord(rec arrow.Record, offset, length int64) (arrow.Record, error) {
 		return nil, fmt.Errorf("invalid slice range: offset %d, length %d, total rows %d",
 			offset, length, rec.NumRows())
 	}
+
 	slices := make([]arrow.Array, rec.NumCols())
 	for i := 0; i < int(rec.NumCols()); i++ {
-		// Note: array.NewSlice creates a shallow slice of the data.
-		slices[i] = array.NewSlice(rec.Column(i), offset, offset+length)
+		col := rec.Column(i)
+		col.Retain()
+		defer col.Release()
+
+		slices[i] = array.NewSlice(col, offset, offset+length)
 	}
 	return array.NewRecord(rec.Schema(), slices, length), nil
+}
+
+// StreamChunksFromReader converts a record into a stream of FlightData chunks.
+func StreamChunksFromReader(rec arrow.Record) (flight.FlightService_DoGetServer, error) {
+	// Implement the logic to convert the record into a stream
+	// This is a placeholder implementation
+	return nil, fmt.Errorf("not implemented")
 }
